@@ -22,14 +22,16 @@ class DQN(nn.Module):
     """
     def __init__(self, state_size, action_size):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(state_size, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.fc4 = nn.Linear(256, 128)
+        self.fc1 = nn.Linear(state_size, 2000)
+        self.fc2 = nn.Linear(2000, 512)
+        self.fc3 = nn.Linear(512, 512)
+        self.fc4 = nn.Linear(512, 128)
         self.fc5 = nn.Linear(128, action_size)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
         x = F.relu(self.fc4(x))
         return self.fc5(x)
 
@@ -41,7 +43,7 @@ class Agent:
     Stock Trading Bot Agent using Deep Q-Learning with experience replay.
     Supports "dqn", "t-dqn" (fixed target) and "double-dqn" strategies.
     """
-    def __init__(self, state_size, strategy="t-dqn", reset_every=1000,
+    def __init__(self, state_size, strategy="t-dqn", reset_every=300,
                  pretrained=False, model_name="model_debug", device=None):
         self.strategy = strategy
         self.state_size = state_size  # length of the state vector (window)
@@ -55,7 +57,7 @@ class Agent:
         self.gamma = 0.95
         self.epsilon = 1.0
         self.epsilon_min = 0.005
-        self.epsilon_decay = 0.999
+        self.epsilon_decay = 0.995
         self.learning_rate = 0.001
 
         # Device configuration (CPU/GPU)
@@ -80,6 +82,12 @@ class Agent:
 
     def remember(self, state, action, reward, next_state, done):
         """Stores experience tuple in memory."""
+        if np.any(np.isnan(state)) or np.any(np.isinf(state)):
+            raise ValueError(f"NaN or Inf in state: {state}")
+        if np.any(np.isnan(next_state)) or np.any(np.isinf(next_state)):
+            raise ValueError(f"NaN or Inf in next_state: {next_state}")
+        if np.isnan(reward) or np.isinf(reward):
+            raise ValueError(f"NaN or Inf in reward: {reward}")
         self.memory.append((state, action, reward, next_state, done))
 
     def act(self, state, is_eval=False):
@@ -119,7 +127,9 @@ class Agent:
         rewards = np.array([experience[2] for experience in mini_batch])
         next_states = np.array([experience[3][0] for experience in mini_batch])
         dones = np.array([1.0 if experience[4] else 0.0 for experience in mini_batch])
-
+        
+        assert not np.isinf(states).any() and not np.isnan(states).any(), f"Bad values in states at iter {self.n_iter}"
+        assert not np.isinf(next_states).any() and not np.isnan(next_states).any(), f"Bad values in next_states at iter {self.n_iter}"
         # Flatten states: (batch_size, window_size * feature_dim)
         states = torch.FloatTensor(states.reshape(batch_size, -1)).to(self.device)
         next_states = torch.FloatTensor(next_states.reshape(batch_size, -1)).to(self.device)
@@ -152,12 +162,14 @@ class Agent:
 
                 assert not torch.isnan(online_next_q).any(), "NaNs in online_next_q"
                 assert not torch.isnan(target_next_q).any(), "NaNs in target_next_q"
-            # elif self.strategy == "t-dqn":
-            #     if self.n_iter % self.reset_every == 0:
-            #         self.target_model.load_state_dict(self.model.state_dict())
-            #     target_q = self.target_model(next_states).max(1)[0]
-            # elif self.strategy == "dqn":
-            #     target_q = self.model(next_states).max(1)[0]
+            elif self.strategy == "t-dqn":
+                # fixed-target DQN: use target network only
+                if self.n_iter % self.reset_every == 0:
+                    self.target_model.load_state_dict(self.model.state_dict())
+                target_q = self.target_model(next_states).max(1)[0]
+            elif self.strategy == "dqn":
+                target_q = self.model(next_states).max(1)[0]
+
             else:
                 raise NotImplementedError(f"Unknown strategy: {self.strategy}")
 
@@ -170,6 +182,7 @@ class Agent:
         # Backpropagation
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         # Update epsilon
@@ -188,17 +201,16 @@ class Agent:
         torch.save(self.model.state_dict(), "models/{}_{}.pth".format(self.model_name, episode))
 
     
-
-
 # --- Training and Evaluation Functions ---
 
-def train_model(agent, episode, data, ep_count=100, batch_size=32, window_size=10):
+def train_model(agent, episode, data, raw_prices, ep_count=100, batch_size=32, window_size=10):
     """
     Runs one training episode on the provided data.
     
     Returns:
         tuple: (episode, ep_count, total_profit, average_loss)
     """
+    #agent.first_iter = True
     total_profit = 0
     data_length = len(data) - 1
 
@@ -210,23 +222,31 @@ def train_model(agent, episode, data, ep_count=100, batch_size=32, window_size=1
     for t in range(data_length):
         reward = 0
         next_state = get_state(data, t + 1, window_size + 1)
-
+        
         # select an action using the agent's policy
         action = agent.act(state)
 
         # BUY
         if action == 1:
-            agent.inventory.append(data[t])
+            agent.inventory.append(raw_prices[t])
+            reward = -0.01
+            ## Make a small transaction cost to ensure that there is not useless buying.
 
         # SELL
         elif action == 2 and len(agent.inventory) > 0:
             bought_price = agent.inventory.pop(0)
             
-            delta = data[t][-1] - bought_price[-1]
+            delta = raw_prices[t] - bought_price
             reward = delta
-            total_profit += delta
+            total_profit += delta - 0.01 ## Small transaction cost.
 
         # HOLD (action == 0) does nothing
+        else:
+            if len(agent.inventory) > 0:
+                # Unrealized profit/loss
+                reward = raw_prices[t] - agent.inventory[-1]
+            else:
+                reward = 0
 
         done = (t == data_length - 1)
         agent.remember(state, action, reward, next_state, done)
@@ -236,7 +256,7 @@ def train_model(agent, episode, data, ep_count=100, batch_size=32, window_size=1
             avg_loss.append(loss)
 
         state = next_state
-
+        
     if episode % 100 == 0:
         agent.save(episode)
 
@@ -244,7 +264,7 @@ def train_model(agent, episode, data, ep_count=100, batch_size=32, window_size=1
     return (episode, ep_count, total_profit, avg_loss_value)
 
 
-def evaluate_model(agent, data, window_size, debug=False):
+def evaluate_model(agent, data, raw_prices, window_size, debug=False):
     """
     Evaluates the agent over the validation data.
     
@@ -267,27 +287,27 @@ def evaluate_model(agent, data, window_size, debug=False):
 
         # BUY
         if action == 1:
-            agent.inventory.append(data[t])
-            history.append((data[t][-1], "BUY"))
+            agent.inventory.append(raw_prices[t])
+            history.append((raw_prices[t], "BUY"))
             if debug:
-                print("Buy at: {}".format(format_currency(data[t][-1])))
+                print("Buy at: {}".format(format_currency(raw_prices[t])))
 
         # SELL
         elif action == 2 and len(agent.inventory) > 0:
             bought_price = agent.inventory.pop(0)
-            delta = data[t][-1] - bought_price[-1]
+            sell_price = raw_prices[t]
+            delta = sell_price - bought_price
             reward = delta
             total_profit += delta
-            history.append((data[t][-1], "SELL"))
+            history.append((sell_price, "SELL"))
             if debug:
-                print("Sell at: {} | Position: {}".format(
-                    format_currency(data[t][-1]), format_position(data[t] - bought_price)))
+                print("Sell at: {} | Position: {}".format(format_currency(sell_price), format_position(delta)))
         else:
-            history.append((data[t][-1], "HOLD"))
+            history.append((raw_prices[t], "HOLD"))
 
         done = (t == data_length - 1)
         # Optionally, record experiences for evaluation.
-        agent.memory.append((state, action, reward, next_state, done))
+        #agent.memory.append((state, action, reward, next_state, done))
 
         state = next_state
         if done:
