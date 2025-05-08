@@ -35,6 +35,55 @@ class DQN(nn.Module):
         x = F.relu(self.fc4(x))
         return self.fc5(x)
 
+class ResidualBlock1D(nn.Module):
+    def __init__(self, channels, kernel_size=3, padding=1):
+        super().__init__()
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size, padding=padding)
+        self.bn1   = nn.BatchNorm1d(channels)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size, padding=padding)
+        self.bn2   = nn.BatchNorm1d(channels)
+
+    def forward(self, x):
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return F.relu(out + residual)
+
+
+class DQNResNetDeep(nn.Module):
+    """
+    A deeper 1D‐Conv+ResNet–style DQN:
+      Input: (batch, window_size+1, feature_dim)
+    """
+    def __init__(self, window_size, feature_dim, action_size,
+                 channels=128, num_blocks=3, fc_hidden=256):
+        super().__init__()
+        # Project input features → channels
+        self.input_conv = nn.Conv1d(feature_dim, channels, kernel_size=3, padding=1)
+        self.input_bn   = nn.BatchNorm1d(channels)
+
+        # More residual blocks
+        self.res_blocks = nn.Sequential(
+            *[ResidualBlock1D(channels) for _ in range(num_blocks)]
+        )
+
+        # Pool across the time dimension
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+
+        # Small MLP head before final action scores
+        self.fc1 = nn.Linear(channels, fc_hidden)
+        self.fc2 = nn.Linear(fc_hidden, action_size)
+
+    def forward(self, x):
+        # x: (batch, time, features) → (batch, features, time)
+        x = x.permute(0, 2, 1)
+        x = F.relu(self.input_bn(self.input_conv(x)))
+        x = self.res_blocks(x)
+        x = self.global_pool(x).squeeze(-1)   # → (batch, channels)
+
+        # MLP head
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
 
 # --- Agent Definition ---
 
@@ -44,27 +93,35 @@ class Agent:
     Supports "dqn", "t-dqn" (fixed target) and "double-dqn" strategies.
     """
     def __init__(self, state_size, strategy="t-dqn", reset_every=300,
-                 pretrained=False, model_name="model_debug", device=None):
+                 pretrained=False, model_name="model_debug", device=None, window_size = None, alphas = None):
         self.strategy = strategy
         self.state_size = state_size  # length of the state vector (window)
         self.action_size = 3          # [HOLD, BUY, SELL]
         self.model_name = model_name
         self.inventory = []
         self.memory = deque(maxlen=10000)
+        # self.memory = PrioritizedReplayBuffer(capacity=100000, alpha=0.6, beta=0.4)
+    
         self.first_iter = True
 
         # Hyperparameters for Q-Learning
         self.gamma = 0.95
-        self.epsilon = 1.0
-        self.epsilon_min = 0.005
+        self.epsilon = 0.99
+        self.epsilon_min = 0.001
         self.epsilon_decay = 0.995
-        self.learning_rate = 0.001
+        self.learning_rate = 0.0005
+        self.window_size = window_size
+        self.alphas = alphas
 
         # Device configuration (CPU/GPU)
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Initialize the primary Q-network
-        self.model = DQN(state_size, self.action_size).to(self.device)
+        # self.model = DQN(state_size, self.action_size).to(self.device)
+        window_size = self.window_size        # e.g. 10
+        feature_dim = self.alphas  # your 84 alphas
+        self.model = DQNResNetDeep(window_size, feature_dim, self.action_size).to(self.device)
+        
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate)
 
         if pretrained and self.model_name is not None:
@@ -76,7 +133,9 @@ class Agent:
         if self.strategy in ["t-dqn", "double-dqn"]:
             self.n_iter = 1
             self.reset_every = reset_every
-            self.target_model = DQN(state_size, self.action_size).to(self.device)
+            self.target_model = DQNResNetDeep(window_size, feature_dim, self.action_size).to(self.device)
+            #DQN(state_size, self.action_size).to(self.device)
+            
             # Initialize target network with same weights
             self.target_model.load_state_dict(self.model.state_dict())
 
@@ -104,7 +163,7 @@ class Agent:
             return 1
 
         # Convert state (np.array) to PyTorch tensor.
-        state_tensor = torch.FloatTensor(state).view(len(state), -1).to(self.device)
+        state_tensor = torch.FloatTensor(state).to(self.device)  #.view(len(state), -1)
         
         with torch.no_grad():
             q_values = self.model(state_tensor)
@@ -120,7 +179,7 @@ class Agent:
 
         # Sample a mini-batch from memory
         mini_batch = random.sample(self.memory, batch_size)
-
+        
         # Split the batch into components
         states = np.array([experience[0][0] for experience in mini_batch])  # shape: (batch, window, features)
         actions = np.array([experience[1] for experience in mini_batch])
@@ -131,11 +190,12 @@ class Agent:
         assert not np.isinf(states).any() and not np.isnan(states).any(), f"Bad values in states at iter {self.n_iter}"
         assert not np.isinf(next_states).any() and not np.isnan(next_states).any(), f"Bad values in next_states at iter {self.n_iter}"
         # Flatten states: (batch_size, window_size * feature_dim)
-        states = torch.FloatTensor(states.reshape(batch_size, -1)).to(self.device)
-        next_states = torch.FloatTensor(next_states.reshape(batch_size, -1)).to(self.device)
+        states = torch.FloatTensor(states).to(self.device)  #.reshape(batch_size, -1)
+        next_states = torch.FloatTensor(next_states).to(self.device) #.reshape(batch_size, -1)
         actions = torch.LongTensor(actions).to(self.device)
         rewards = torch.FloatTensor(rewards).to(self.device)
         dones = torch.FloatTensor(dones).to(self.device)
+        
         
         assert not torch.isnan(states).any(), "NaNs in states"
         assert not torch.isnan(next_states).any(), "NaNs in next_states"
@@ -189,6 +249,7 @@ class Agent:
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
+
         # Update iteration counter
         self.n_iter += 1
 
@@ -217,12 +278,11 @@ def train_model(agent, episode, data, raw_prices, ep_count=100, batch_size=32, w
     agent.inventory = []
     avg_loss = []
 
-    state = get_state(data, 0, window_size + 1)
-    
+    state = get_state(data, 0, window_size + 1, raw_prices, agent)
+
     for t in range(data_length):
         reward = 0
-        next_state = get_state(data, t + 1, window_size + 1)
-        
+        next_state = get_state(data, t + 1, window_size + 1, raw_prices, agent)
         # select an action using the agent's policy
         action = agent.act(state)
 
@@ -277,11 +337,11 @@ def evaluate_model(agent, data, raw_prices, window_size, debug=False):
     history = []
     agent.inventory = []
 
-    state = get_state(data, 0, window_size + 1)
-
+    state = get_state(data, 0, window_size + 1, raw_prices, agent)
+    
     for t in range(data_length):
         reward = 0
-        next_state = get_state(data, t + 1, window_size + 1)
+        next_state = get_state(data, t + 1, window_size + 1, raw_prices, agent)
 
         action = agent.act(state, is_eval=True)
 

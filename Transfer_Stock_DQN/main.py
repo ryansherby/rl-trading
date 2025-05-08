@@ -11,11 +11,10 @@ import argparse
 from model import *
 from utils import *
 import glob
-
-
 import numpy as np
 import pandas as pd
 from alphas101 import *
+import time
 pd.options.mode.chained_assignment = None
 # --- Main Training Loop ---
 
@@ -27,11 +26,19 @@ def main(train_dir, val_dir, window_size, batch_size, ep_count,
     # Use the window size as the state dimension. (Note: We use window_size+1 in get_state.)
     num_features = 82  # alphas
     state_size = (window_size + 1) * num_features
-    agent = Agent(state_size, strategy=strategy, pretrained=pretrained, model_name=model_name)
+    agent = Agent(state_size, strategy=strategy, pretrained=pretrained, model_name=model_name, window_size=window_size, alphas=num_features)
+    
     print(train_dir + "*.csv")
+    all_train_files = glob.glob(os.path.join(train_dir, "*.csv"))
 
-    train_stock_files = glob.glob(train_dir + "*.csv")[:10]
-    val_stock_files = glob.glob(val_dir + "*.csv")[:2]
+    val_stock_files = glob.glob(val_dir + "*.csv")[:4]
+
+    tickers = {
+    "LVMUY","ACGBY","LLY","TSM","CRM","NVO","NFLX","TM","TCEHY",
+    "ORCL","WMT","SAP","TSLA","NSRGY","GOOGL","META","BAC","CSCO", "WFC", "AMZN","KO","RHHBY","COST"
+    }
+    train_stock_files = [f for f in all_train_files if any(os.path.basename(f).startswith(t) for t in tickers)]
+
     if  len(train_stock_files)==0 or  len(val_stock_files)==0:
         raise ValueError("No CSV files found in train or val directories")
 
@@ -55,6 +62,7 @@ def main(train_dir, val_dir, window_size, batch_size, ep_count,
 
         #(episode, ep_count, total_profit, avg_loss_value)
         for train_data_file in train_stock_files:
+            start = time.time()
             print(f"Train Run on {train_data_file}")
             train_data, raw_prices = safe_get(train_data_file)
             
@@ -63,7 +71,7 @@ def main(train_dir, val_dir, window_size, batch_size, ep_count,
             train_total_profit += train_result[2]
             train_profits.append(train_result[2])
             train_total_loss += train_result[3]
-            show_train_result(episode, ep_count, train_result[2], train_result[3])
+            show_train_result(episode, ep_count, train_result[2], train_result[3], time.time() - start)
             
 
         train_avg_profit = train_total_profit / len(train_stock_files)
@@ -82,7 +90,7 @@ def main(train_dir, val_dir, window_size, batch_size, ep_count,
             show_val_result(episode, ep_count, train_result[2], initial_offset)
 
         val_avg_profit = val_total_profit / len(val_stock_files)
-        
+        print(f"EPOCH: {episode}/{ep_count + 1} Train Avg Profit: {train_avg_profit} Train Avg Loss: {train_avg_loss} Val Avg Profit: {val_avg_profit}")
 
 # --- Entry Point ---
 if __name__ == "__main__":
@@ -92,10 +100,10 @@ if __name__ == "__main__":
     parser.add_argument("--val_dir", help="Path to the validation stock CSV file")
     parser.add_argument("--strategy", default="double-dqn", choices=["dqn", "t-dqn", "double-dqn"],
                         help="The learning strategy to use")
-    parser.add_argument("--window-size", type=int, default=30,
+    parser.add_argument("--window-size", type=int, default=60,
                         help="The window size for state representation")
-    parser.add_argument("--batch-size", type=int, default=64, help="Mini-batch size for training")
-    parser.add_argument("--episode-count", type=int, default=5, help="Number of training episodes")
+    parser.add_argument("--batch-size", type=int, default=512, help="Mini-batch size for training")
+    parser.add_argument("--episode-count", type=int, default=20, help="Number of training episodes")
     parser.add_argument("--modelname", type=str, default="model_debug", help="Name of the model file")
     parser.add_argument("--pretrained", action="store_true", help="Load pretrained model weights")
     # parser.add_argument("--debug", action="store_true", help="Enable debug level logging")
