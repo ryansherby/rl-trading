@@ -29,28 +29,20 @@ class DQN(nn.Module):
         self.fc4 = nn.Linear(256, 128)
         self.fc5 = nn.Linear(128, action_size)
         
-        self.bn1 = nn.BatchNorm1d(128)
-        self.bn2 = nn.BatchNorm1d(256)
-        self.bn3 = nn.BatchNorm1d(256)
-        self.bn4 = nn.BatchNorm1d(128)
          
         self.relu = nn.ReLU()
 
     def forward(self, x):
         y = nn.Sequential(
-            self.fc1(x),
-            self.bn1(self.fc1(x)),
-            self.relu(),
-            self.fc2(x),
-            self.bn2(self.fc2(x)),
-            self.relu(),
-            self.fc3(x),
-            self.bn3(self.fc3(x)),
-            self.relu(),
-            self.fc4(x),
-            self.bn4(self.fc4(x)),
-            self.relu(),
-            self.fc5(x)
+            self.fc1,
+            self.relu,
+            self.fc2,
+            self.relu,
+            self.fc3,
+            self.relu,
+            self.fc4,
+            self.relu,
+            self.fc5
         )(x)
         
         # Argmax over actions to get the best action

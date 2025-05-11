@@ -24,13 +24,11 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 tickers = {
-    "LVMUY","ACGBY",
-    "LLY","TSM","CRM","NVO","NFLX","TM","TCEHY",
-    "ORCL","WMT","SAP","TSLA","NSRGY","GOOGL","META","BAC","CSCO", "WFC", "AMZN","KO","RHHBY","COST"
+    "btc"
     }
 
-DATA_DIR    = "/insomnia001/home/ik2592/slurm_outs/RL2/data/train"
-OUTPUT_ROOT = "/insomnia001/depts/free/users/ik2592/outputs"
+DATA_DIR    = "./Transfer_Stock_DQN/data"
+OUTPUT_ROOT = "./Transfer_Stock_DQN/outputs"
 
 fe = FeatureEngineer(
     use_technical_indicator=True,
@@ -39,7 +37,7 @@ fe = FeatureEngineer(
     user_defined_feature=False
 )
 common_env_kwargs = {
-    "hmax": 100,
+    "hmax": 10,
     "initial_amount": 1_000_000,
     "buy_cost_pct": None,  # filled per-ticker below
     "sell_cost_pct": None, # "
@@ -61,7 +59,7 @@ for idx, tic in enumerate(tickers):
     print(f"\n--- Epoch {idx+1}/{len(tickers)}: Training on {tic.upper()} ---")
 
     # a) load & rename
-    df = pd.read_csv(f"{DATA_DIR}/{tic}_market_data.csv").rename(columns={
+    df = pd.read_csv(f"{DATA_DIR}/{tic}.csv").rename(columns={
         "Start":     "date",
         "Adj Close": "adjcp",
         "Close":     "close",
@@ -76,17 +74,17 @@ for idx, tic in enumerate(tickers):
     proc = fe.preprocess_data(df)
 
     # c) split
-    train = data_split(proc, "2009-01-05", "2022-12-20")
+    train = data_split(proc, "2013-12-31", "2024-01-01")
     # (you can skip making trade set here if you’re not evaluating yet)
 
     # d) env kwargs
     stock_dim   = len(train.tic.unique())      # will be 1
     state_space = 1 + 2*stock_dim + len(INDICATORS)*stock_dim
     env_kwargs = {
-        "hmax":               100,
+        "hmax":               10,
         "initial_amount":     1_000_000,
         "buy_cost_pct":       [0.001]*stock_dim,
-        "sell_cost_pct":      [0.001]*stock_dim,
+        "sell_cost_pct":      [0]*stock_dim,
         "num_stock_shares":   [0]*stock_dim,
         "stock_dim":          stock_dim,
         "action_space":       stock_dim,
@@ -119,9 +117,10 @@ for idx, tic in enumerate(tickers):
         SAC_PARAMS = {
             "batch_size": 128,
             "buffer_size": 100000,
-            "learning_rate": 0.0003,
+            "learning_rate": 0.0001,
             "learning_starts": 100,
-            "ent_coef": "auto_0.1",
+            "ent_coef": .01,
+            "device": "mps",
         }
         model_ppo = agent.get_model("sac",model_kwargs = SAC_PARAMS)
 
@@ -146,7 +145,7 @@ for idx, tic in enumerate(tickers):
                              tb_log_name='sac',
                              total_timesteps=80000)
 
-    trade = data_split(proc, "2022-12-21", "2023-12-20")
+    trade = data_split(proc, "2024-01-01", "2025-01-01")
     e_trade_gym = StockTradingEnv(df=trade, **env_kwargs)
     df_daily_return, df_actions = DRLAgent.DRL_prediction(
         model=trained_sac,
