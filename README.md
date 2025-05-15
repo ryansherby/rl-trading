@@ -2,15 +2,15 @@
 
 ## Dataset
 
-Run the $createdata.py$ file to download and format publicly available stock data available from the $yfinance$ library. Select a training set and test set from the data based on a cutoff date for both stock data and crypto data.
+Run the `createdata.py` file to download and format publicly available stock data available from the `yfinance` library. Select a training set and test set from the data based on a cutoff date for both stock data and crypto data.
 
 ## Training Environment
 
-Download the $StockTradingEnv$ from $finRL$. Ensure the reward function is consistent with the description in the paper.
+Download the `StockTradingEnv` from `finRL`. Ensure the reward function is consistent with the description in the paper.
 
 ## Agent
 
-Define the parameters for each DRL algorithm and initialize an agent instance provided by $stable_baselines3$ library.
+Define the parameters for each DRL algorithm and initialize an agent instance provided by `stable_baselines3` library.
 
 ## Training Runtime Loop (Pre-Training)
 
